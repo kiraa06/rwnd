@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kiraa06/claude-cl/internal/launch"
-	"github.com/kiraa06/claude-cl/internal/scan"
+	"github.com/kiraa06/rwnd/internal/launch"
+	"github.com/kiraa06/rwnd/internal/scan"
 )
 
 const (

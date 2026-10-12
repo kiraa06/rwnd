@@ -1,6 +1,6 @@
 package group
 
-import "github.com/kiraa06/claude-cl/internal/scan"
+import "github.com/kiraa06/rwnd/internal/scan"
 
 const maxTreeDepth = 4
 

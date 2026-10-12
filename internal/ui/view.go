@@ -8,8 +8,8 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/kiraa06/claude-cl/internal/group"
-	"github.com/kiraa06/claude-cl/internal/scan"
+	"github.com/kiraa06/rwnd/internal/group"
+	"github.com/kiraa06/rwnd/internal/scan"
 )
 
 // Colours are adaptive so the picker reads correctly on light and dark

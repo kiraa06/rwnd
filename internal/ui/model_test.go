@@ -13,8 +13,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
-	"github.com/kiraa06/claude-cl/internal/launch"
-	"github.com/kiraa06/claude-cl/internal/scan"
+	"github.com/kiraa06/rwnd/internal/launch"
+	"github.com/kiraa06/rwnd/internal/scan"
 )
 
 // key builds the KeyMsg for a key name, so tests read like keystrokes.

@@ -37,5 +37,5 @@ release:
     ## Install
 
     ```sh
-    curl -fsSL https://raw.githubusercontent.com/kiraa06/claude-cl/main/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/kiraa06/rwnd/main/install.sh | sh
     ```

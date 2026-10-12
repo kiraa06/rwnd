@@ -5,8 +5,8 @@ Thanks for taking a look. Issues and pull requests are both welcome.
 ## Getting set up
 
 ```sh
-git clone https://github.com/kiraa06/claude-cl
-cd claude-cl
+git clone https://github.com/kiraa06/rwnd
+cd rwnd
 go test ./...
 go build -o ~/.local/bin/cl ./cmd/cl
 ```

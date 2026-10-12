@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kiraa06/claude-cl/internal/scan"
+	"github.com/kiraa06/rwnd/internal/scan"
 )
 
 func forkSess(id, parent, title string, age time.Duration) scan.Session {

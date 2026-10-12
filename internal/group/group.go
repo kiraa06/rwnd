@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kiraa06/claude-cl/internal/scan"
+	"github.com/kiraa06/rwnd/internal/scan"
 )
 
 // Kind identifies a section, in the order the picker shows them.

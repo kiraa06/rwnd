@@ -1,4 +1,4 @@
-module github.com/kiraa06/claude-cl
+module github.com/kiraa06/rwnd
 
 go 1.26
 

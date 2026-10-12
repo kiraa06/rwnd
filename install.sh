@@ -1,14 +1,14 @@
 #!/bin/sh
 # Install cl, the Claude Code session picker.
 #
-#   curl -fsSL https://raw.githubusercontent.com/kiraa06/claude-cl/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/kiraa06/rwnd/main/install.sh | sh
 #
 # Set BINDIR to choose where the binary lands (default: ~/.local/bin).
 # Set VERSION to install a specific tag (default: the latest release).
 
 set -eu
 
-REPO="kiraa06/claude-cl"
+REPO="kiraa06/rwnd"
 BINDIR="${BINDIR:-$HOME/.local/bin}"
 
 die() {

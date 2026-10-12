@@ -15,9 +15,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/kiraa06/claude-cl/internal/launch"
-	"github.com/kiraa06/claude-cl/internal/tool"
-	"github.com/kiraa06/claude-cl/internal/ui"
+	"github.com/kiraa06/rwnd/internal/launch"
+	"github.com/kiraa06/rwnd/internal/tool"
+	"github.com/kiraa06/rwnd/internal/ui"
 )
 
 // version is stamped by the release pipeline. When it is not — someone ran

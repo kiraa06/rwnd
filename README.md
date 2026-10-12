@@ -1,12 +1,12 @@
-<h1 align="center">cl</h1>
+<h1 align="center">rwnd</h1>
 
 <p align="center">
   <em>Pick up where you left off in Claude Code, Grok, or Codex.</em>
 </p>
 
 <p align="center">
-  <a href="https://github.com/kiraa06/claude-cl/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/kiraa06/claude-cl/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/kiraa06/claude-cl/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/kiraa06/claude-cl?color=brightgreen"></a>
+  <a href="https://github.com/kiraa06/rwnd/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/kiraa06/rwnd/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/kiraa06/rwnd/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/kiraa06/rwnd?color=brightgreen"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="Platforms" src="https://img.shields.io/badge/macOS%20%7C%20Linux-lightgrey">
 </p>
@@ -29,7 +29,7 @@ bordered panes that follow the terminal size.
 **Script** — macOS and Linux, no Go needed:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kiraa06/claude-cl/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/kiraa06/rwnd/main/install.sh | sh
 ```
 
 Installs to `~/.local/bin`. Set `BINDIR=/usr/local/bin` to change that.
@@ -37,18 +37,18 @@ Installs to `~/.local/bin`. Set `BINDIR=/usr/local/bin` to change that.
 **Go**:
 
 ```sh
-go install github.com/kiraa06/claude-cl/cmd/cl@latest
+go install github.com/kiraa06/rwnd/cmd/cl@latest
 ```
 
 **From source**:
 
 ```sh
-git clone https://github.com/kiraa06/claude-cl
-cd claude-cl
+git clone https://github.com/kiraa06/rwnd
+cd rwnd
 go build -ldflags='-s -w' -o ~/.local/bin/cl ./cmd/cl
 ```
 
-Or grab a binary from the [releases page](https://github.com/kiraa06/claude-cl/releases).
+Or grab a binary from the [releases page](https://github.com/kiraa06/rwnd/releases).
 
 ### Requirements
 

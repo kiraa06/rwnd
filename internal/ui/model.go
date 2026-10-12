@@ -6,10 +6,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/kiraa06/claude-cl/internal/group"
-	"github.com/kiraa06/claude-cl/internal/launch"
-	"github.com/kiraa06/claude-cl/internal/scan"
-	"github.com/kiraa06/claude-cl/internal/tool"
+	"github.com/kiraa06/rwnd/internal/group"
+	"github.com/kiraa06/rwnd/internal/launch"
+	"github.com/kiraa06/rwnd/internal/scan"
+	"github.com/kiraa06/rwnd/internal/tool"
 )
 
 // allCap bounds the global section; the rest stay reachable through search.
