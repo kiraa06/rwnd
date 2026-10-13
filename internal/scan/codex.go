@@ -1,21 +1,21 @@
 package scan
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
-)
-
-var (
-	markSessionMeta  = []byte(`"type":"session_meta"`)
-	markResponseItem = []byte(`"type":"response_item"`)
+	"sync"
 )
 
 // Codex lists Codex CLI rollouts under root (~/.codex/sessions).
-// Archived sessions are skipped. Only a head window is parsed.
+// Archived and non-user sessions are skipped. Complete records are streamed
+// so large instructions and long turns cannot hide a resumable conversation.
 func Codex(root string) ([]Session, error) {
 	var paths []string
 	err := filepath.Walk(root, func(p string, fi os.FileInfo, err error) error {
@@ -38,9 +38,28 @@ func Codex(root string) ([]Session, error) {
 		return nil, err
 	}
 
+	parsed := make([]Session, len(paths))
+	work := make(chan int)
+	var wg sync.WaitGroup
+	for range min(4, runtime.GOMAXPROCS(0), len(paths)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range work {
+				if s, ok := codexOne(paths[i]); ok {
+					parsed[i] = s
+				}
+			}
+		}()
+	}
+	for i := range paths {
+		work <- i
+	}
+	close(work)
+	wg.Wait()
 	out := make([]Session, 0, len(paths))
-	for _, p := range paths {
-		if s, ok := codexOne(p); ok {
+	for _, s := range parsed {
+		if s.ID != "" {
 			out = append(out, s)
 		}
 	}
@@ -56,11 +75,15 @@ func codexOne(path string) (Session, bool) {
 	if err != nil || fi.Size() == 0 {
 		return Session{}, false
 	}
-	head, tail, err := windows(path, fi.Size())
+	f, err := os.Open(path)
 	if err != nil {
 		return Session{}, false
 	}
-	meta := parseCodex(head, tail)
+	defer f.Close()
+	meta, err := readCodex(f)
+	if err != nil || meta.Hidden {
+		return Session{}, false
+	}
 	if meta.ID == "" || meta.Cwd == "" || meta.Title == "" {
 		return Session{}, false
 	}
@@ -70,6 +93,8 @@ func codexOne(path string) (Session, bool) {
 		Title:    meta.Title,
 		AITitled: false,
 		Cwd:      meta.Cwd,
+		Branch:   meta.Branch,
+		ParentID: meta.ParentID,
 		Model:    meta.Model,
 		Modified: fi.ModTime(),
 		Preview:  meta.Preview,
@@ -78,74 +103,171 @@ func codexOne(path string) (Session, bool) {
 }
 
 type codexMeta struct {
-	ID      string
-	Cwd     string
-	Title   string
-	Model   string
-	Preview []Turn
+	ID       string
+	Cwd      string
+	Title    string
+	Model    string
+	Branch   string
+	ParentID string
+	Preview  []Turn
+	Hidden   bool
 }
 
 type codexRecord struct {
 	Type    string `json:"type"`
 	Payload struct {
-		ID      string          `json:"id"`
-		Cwd     string          `json:"cwd"`
-		Type    string          `json:"type"`
-		Role    string          `json:"role"`
-		Model   string          `json:"model"`
-		Content json.RawMessage `json:"content"`
+		ID         string          `json:"id"`
+		Cwd        string          `json:"cwd"`
+		Type       string          `json:"type"`
+		Role       string          `json:"role"`
+		Model      string          `json:"model"`
+		ParentID   string          `json:"forked_from_id"`
+		Originator string          `json:"originator"`
+		Source     json.RawMessage `json:"source"`
+		Content    json.RawMessage `json:"content"`
+		Git        struct {
+			Branch string `json:"branch"`
+		} `json:"git"`
 	} `json:"payload"`
 }
 
-func parseCodex(head, tail []byte) codexMeta {
-	var m codexMeta
-	var candidates []string
-	forEachLine(head, func(line []byte) {
-		switch {
-		case m.ID == "" && bytes.Contains(line, markSessionMeta):
-			if r, ok := decodeCodex(line); ok {
-				m.ID, m.Cwd = r.Payload.ID, r.Payload.Cwd
-			}
-		case bytes.Contains(line, markResponseItem):
-			r, ok := decodeCodex(line)
-			if !ok || r.Payload.Type != "message" {
-				return
-			}
-			if r.Payload.Role == "user" && len(candidates) < titleCandidates {
-				if t := CleanTitle(codexText(r.Payload.Content)); t != "" && !codexInjected(t) {
-					candidates = append(candidates, t)
-				}
-			}
+// readCodex owns both record recovery and Codex metadata semantics. The buffer
+// grows for a single oversized record, never for the whole transcript.
+func readCodex(f io.Reader) (codexMeta, error) {
+	reader := bufio.NewReaderSize(f, 64<<10)
+	var record []byte
+	var parser codexParser
+	var discard bool
+	var kind string
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(record) == 0 && !discard {
+			kind, discard = codexDiscard(fragment, parser.seenMeta)
 		}
-	})
-	m.Title = bestTitle(candidates)
-
-	end := tail
-	if end == nil {
-		end = head
+		if err == bufio.ErrBufferFull {
+			if !discard {
+				record = append(record, fragment...)
+			}
+			continue
+		}
+		line := fragment
+		if len(record) != 0 {
+			record = append(record, fragment...)
+			line = record
+		}
+		if !discard || !parser.seenMeta {
+			parser.consume(line, kind)
+		}
+		record = record[:0]
+		discard = false
+		if parser.meta.Hidden {
+			return parser.meta, nil
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return codexMeta{}, err
+		}
 	}
-	forEachLine(end, func(line []byte) {
-		if !bytes.Contains(line, markResponseItem) {
+	parser.meta.Title = bestTitle(parser.candidates)
+	if parser.meta.Model == "" {
+		parser.meta.Model = parser.legacyModel
+	}
+	return parser.meta, nil
+}
+
+type codexParser struct {
+	meta        codexMeta
+	seenMeta    bool
+	candidates  []string
+	legacyModel string
+	originator  string
+}
+
+func (p *codexParser) consume(line []byte, kind string) {
+	firstMeta := !p.seenMeta
+	if firstMeta && len(bytes.TrimSpace(line)) == 0 {
+		return
+	}
+	// A key may follow a large value, beyond the first fragment. Recheck the
+	// complete record rather than guessing from marker text inside its content.
+	if kind == "" {
+		var discard bool
+		kind, discard = codexDiscard(line, p.seenMeta)
+		if discard {
+			if firstMeta {
+				p.meta.Hidden = true
+			}
 			return
 		}
-		r, ok := decodeCodex(line)
-		if !ok || r.Payload.Type != "message" {
+	}
+	if firstMeta {
+		p.seenMeta = true
+	}
+	r, ok := decodeCodex(line)
+	if !ok || (firstMeta && r.Type != "session_meta") {
+		if firstMeta {
+			p.meta.Hidden = true // inherited history cannot repair the fork's identity
+		}
+		return // an active rollout may end with an incomplete non-header record
+	}
+	switch r.Type {
+	case "session_meta":
+		if p.seenMeta && !firstMeta {
+			return // inherited history may contain another session's header
+		}
+		p.seenMeta = true
+		p.meta.ID, p.meta.Cwd = r.Payload.ID, r.Payload.Cwd
+		p.meta.Branch, p.meta.ParentID = r.Payload.Git.Branch, r.Payload.ParentID
+		p.meta.Hidden = codexNonUserSource(r.Payload.Source)
+		p.originator = r.Payload.Originator
+	case "turn_context":
+		if r.Payload.Model != "" {
+			p.meta.Model = r.Payload.Model
+		}
+		if r.Payload.Cwd != "" {
+			p.meta.Cwd = r.Payload.Cwd
+		}
+	case "response_item":
+		if r.Payload.Type != "message" || (r.Payload.Role != "user" && r.Payload.Role != "assistant") {
 			return
 		}
 		if r.Payload.Model != "" {
-			m.Model = r.Payload.Model
+			p.legacyModel = r.Payload.Model
 		}
-		t := CleanTitle(codexText(r.Payload.Content))
-		if t == "" || codexInjected(t) {
-			return
+		raw := codexText(r.Payload.Content)
+		var text string
+		if r.Payload.Role == "user" {
+			if p.originator == "paseo" && len(p.candidates) == 0 && codexTitleGeneration(raw) {
+				p.meta.Hidden = true
+				return
+			}
+			text = codexPrompt(raw)
+			if text != "" && len(p.candidates) < titleCandidates {
+				p.candidates = append(p.candidates, text)
+			}
+		} else {
+			text = codexDisplayText(raw)
 		}
-		role := r.Payload.Role
-		if role != "user" && role != "assistant" {
-			return
+		if text != "" {
+			p.meta.Preview = appendTurn(p.meta.Preview, Turn{Role: r.Payload.Role, Text: text})
 		}
-		m.Preview = appendTurn(m.Preview, Turn{Role: role, Text: t})
-	})
-	return m
+	}
+}
+
+func codexNonUserSource(raw json.RawMessage) bool {
+	var source string
+	if json.Unmarshal(raw, &source) == nil {
+		return source == "subagent" || strings.HasPrefix(source, "subagent_") || source == "internal" || strings.HasPrefix(source, "internal_")
+	}
+	var tagged map[string]json.RawMessage
+	if json.Unmarshal(raw, &tagged) != nil {
+		return false
+	}
+	_, subagent := tagged["subagent"]
+	_, internal := tagged["internal"]
+	return subagent || internal
 }
 
 func decodeCodex(line []byte) (codexRecord, bool) {
@@ -157,8 +279,9 @@ func decodeCodex(line []byte) (codexRecord, bool) {
 }
 
 func codexText(raw json.RawMessage) string {
-	if t := textOf(raw); t != "" {
-		return t
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
 	}
 	var blocks []struct {
 		Type string `json:"type"`
@@ -179,12 +302,8 @@ func codexText(raw json.RawMessage) string {
 	return b.String()
 }
 
-func codexInjected(t string) bool {
-	if strings.HasPrefix(t, "<") {
-		return true
-	}
-	if strings.HasPrefix(t, "# AGENTS.md") || strings.HasPrefix(t, "AGENTS.md") {
-		return true
-	}
-	return false
+func codexDisplayText(text string) string {
+	text = loneTag.ReplaceAllString(text, " ")
+	text = SanitizeDisplayText(text)
+	return truncate(strings.Join(strings.Fields(text), " "), titleMaxLen)
 }
