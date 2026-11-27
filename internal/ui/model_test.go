@@ -15,6 +15,7 @@ import (
 
 	"github.com/kiraa06/rwnd/internal/launch"
 	"github.com/kiraa06/rwnd/internal/scan"
+	"github.com/kiraa06/rwnd/internal/tool"
 )
 
 // key builds the KeyMsg for a key name, so tests read like keystrokes.
@@ -269,6 +270,74 @@ func TestNavigationStopsAtEnds(t *testing.T) {
 	}
 }
 
+func TestResumeUsesSavedModelInFooterAndInvocation(t *testing.T) {
+	useNoColor(t)
+	for _, tc := range []struct {
+		kind, saved, want string
+		options, args     []string
+	}{
+		{tool.Codex, "gpt-5-saved", "gpt-5-saved", []string{"gpt-5-configured"}, []string{"codex", "resume", "sid", "-c", "model=gpt-5-saved"}},
+		{tool.Codex, "gpt-5-saved", "gpt-5-saved", nil, []string{"codex", "resume", "sid", "-c", "model=gpt-5-saved"}},
+		{tool.Grok, "grok-custom", "grok-custom", []string{"grok-4.6", "grok-4.5"}, []string{"grok", "--resume", "sid", "-m", "grok-custom"}},
+		{tool.Claude, "claude-sonnet-5", "sonnet", []string{"opus", "sonnet"}, []string{"claude", "--resume", "sid", "--model", "sonnet"}},
+		{tool.Claude, "claude-custom", "claude-custom", []string{"opus", "sonnet"}, []string{"claude", "--resume", "sid", "--model", "claude-custom"}},
+	} {
+		name := tc.kind + "/" + tc.saved
+		if tc.options == nil {
+			name += "/unconfigured"
+		}
+		t.Run(name, func(t *testing.T) {
+			cwd := t.TempDir()
+			m := New([]scan.Session{{ID: "sid", Cwd: cwd, Model: tc.saved, Tool: tc.kind}}, cwd, t.TempDir(), tc.options)
+			m.AttachTools(t.TempDir(), tc.kind, []string{tc.kind})
+			m = press(m, "down")
+			if footer := m.renderFooter(); !strings.Contains(footer, "‹ "+tc.want+" ›") {
+				t.Errorf("footer = %q, want %q selected", footer, tc.want)
+			}
+			choice := press(m, "enter").Choice
+			if choice == nil || choice.Mode != launch.Resume || choice.Tool != tc.kind {
+				t.Fatalf("unexpected choice: %+v", choice)
+			}
+			spec := launch.BuildFor(choice.Tool, tc.kind, choice.Mode, choice.Session.ID, choice.Session.Cwd, cwd, choice.Model)
+			if !reflect.DeepEqual(spec.Args, tc.args) {
+				t.Errorf("invocation = %q, want %q", spec.Args, tc.args)
+			}
+		})
+	}
+}
+
+func TestCodexModelOverrideSticksAcrossRows(t *testing.T) {
+	useNoColor(t)
+	cwd := t.TempDir()
+	sessions := []scan.Session{
+		{ID: "first", Cwd: cwd, Model: "gpt-5-first", Modified: time.Now()},
+		{ID: "second", Cwd: cwd, Model: "gpt-5-second"},
+	}
+	m := New(sessions, cwd, t.TempDir(), []string{"gpt-5-configured"})
+	m.AttachTools(t.TempDir(), tool.Codex, []string{tool.Codex})
+	m = press(m, "down", "right", "down")
+	if m.modelOverride == "" || !strings.Contains(m.renderFooter(), "‹ gpt-5-configured ›") {
+		t.Errorf("override not pinned in footer: %q", m.renderFooter())
+	}
+	if choice := press(m, "f").Choice; choice == nil || choice.Session.ID != "second" || choice.Model != "gpt-5-configured" {
+		t.Fatalf("fork choice = %+v, want second session with pinned model", choice)
+	}
+	if next := press(m, "right").currentModel(); next != "gpt-5-second" {
+		t.Errorf("cycling on the second chat selected %q, want its saved model", next)
+	}
+}
+
+func TestFooterKeepsActiveModelVisible(t *testing.T) {
+	useNoColor(t)
+	dir := t.TempDir()
+	m := New([]scan.Session{{ID: "one", Cwd: dir, Model: "grok-saved-model"}}, dir, dir,
+		[]string{"grok-a-long-configured-default", "grok-4.6", "grok-4.5"})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
+	if out := press(tm.(Model), "down").View(); !strings.Contains(out, "‹ grok-saved-model ›") {
+		t.Errorf("active model not visible at 60 columns:\n%s", out)
+	}
+}
+
 func TestModelFollowsHighlightedSession(t *testing.T) {
 	m := press(testModel(t), "down") // onto the sonnet session
 	if got := m.currentModel(); got != "sonnet" {
@@ -400,15 +469,54 @@ func TestDeleteMovesTranscriptToTrash(t *testing.T) {
 		t.Error("transcript is still in the store")
 	}
 	// Moved, not erased: it must be findable in the trash.
-	var found bool
-	filepath.Walk(filepath.Join(claudeDir, scan.TrashDir), func(p string, fi os.FileInfo, err error) error {
-		if err == nil && fi != nil && !fi.IsDir() {
-			found = true
+	var moved string
+	if err := filepath.Walk(filepath.Join(claudeDir, scan.TrashDir), func(p string, fi os.FileInfo, err error) error {
+		if err == nil && !fi.IsDir() {
+			moved = p
 		}
-		return nil
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if moved == "" {
+		t.Fatal("transcript was not preserved in the trash")
+	}
+	rel, err := filepath.Rel(claudeDir, moved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.status != "moved to "+rel {
+		t.Errorf("status = %q, want full store-relative location %q", m.status, rel)
+	}
+}
+
+func TestDeletePartialSuccessRemovesRowAndReportsSidecarFailure(t *testing.T) {
+	store := t.TempDir()
+	cwd := t.TempDir()
+	m := New([]scan.Session{{ID: "sid", Cwd: cwd}}, cwd, store, nil)
+	m = press(m, "down", "d")
+	rel := filepath.Join(scan.TrashDir, "2026-11-28", "session-unique", "project__sid.jsonl")
+	next, _ := m.updateConfirm(key("y"), func(gotStore string, s scan.Session) (string, error) {
+		if gotStore != store || s.ID != "sid" {
+			t.Fatalf("attempted to trash %q in %q", s.ID, gotStore)
+		}
+		return filepath.Join(store, rel), fmt.Errorf("subagents left behind: permission denied")
 	})
-	if !found {
-		t.Error("transcript was not preserved in the trash")
+	m = next
+	if len(m.sessions) != 0 || m.confirming {
+		t.Errorf("partially trashed transcript still listed or awaiting confirmation")
+	}
+	if !strings.Contains(m.status, rel) || !strings.Contains(m.status, "subagents left behind") {
+		t.Errorf("status = %q, want location and sidecar failure", m.status)
+	}
+}
+
+func TestDeleteWithoutMovingTranscriptKeepsRow(t *testing.T) {
+	cwd := t.TempDir()
+	m := New([]scan.Session{{ID: "sid", Cwd: cwd, Path: filepath.Join(cwd, "absent.jsonl")}}, cwd, t.TempDir(), nil)
+	m = press(m, "down", "d", "y")
+	if len(m.sessions) != 1 || !strings.HasPrefix(m.status, "could not delete: ") {
+		t.Errorf("sessions = %d, status = %q; want unmoved row and error", len(m.sessions), m.status)
 	}
 }
 
@@ -920,8 +1028,16 @@ func TestAgentHintKeepsCopyAndDelete(t *testing.T) {
 func TestToolCycleListErrorSetsStatus(t *testing.T) {
 	t.Setenv("CL_CONFIG_DIR", t.TempDir())
 	m := testModel(t)
-	// home has no .grok/sessions directory, so listing grok fails.
-	m.AttachTools(t.TempDir(), "claude", []string{"claude", "grok"})
+	home := t.TempDir()
+	// A missing store is expected before the first chat. A file in place of
+	// the sessions directory is an actual scan error.
+	if err := os.Mkdir(filepath.Join(home, ".grok"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".grok", "sessions"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.AttachTools(home, "claude", []string{"claude", "grok"})
 	m = press(m, "t")
 	if m.currentTool() != "grok" {
 		t.Errorf("tool = %q, want grok", m.currentTool())

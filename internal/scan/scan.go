@@ -59,7 +59,7 @@ type Session struct {
 	ContinuedIn string // session this one was continued in, if any
 	Clone       bool   // Claude marked this as a branch/clone
 	Missing     bool   // working directory no longer exists
-	Tool        string // "claude", "grok", or "codex"; empty means claude
+	Tool        string // owning backend; empty means Claude
 }
 
 // Discover returns the transcript paths of real sessions under root.
