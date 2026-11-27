@@ -5,13 +5,13 @@ Thanks for taking a look. Issues and pull requests are both welcome.
 ## Getting set up
 
 ```sh
-git clone https://github.com/kiraa06/rwnd
+git clone https://github.com/kiraa06/rwnd.git
 cd rwnd
 go test ./...
 go build -o ~/.local/bin/cl ./cmd/cl
 ```
 
-Go 1.26 or newer. There are no dependencies beyond Bubble Tea and Lipgloss.
+Use Go 1.26 or newer. The installer tests also require Python 3.9 or newer.
 
 ## Before opening a pull request
 
@@ -21,6 +21,7 @@ CI runs these on Linux and macOS, so run them first:
 gofmt -l .          # must print nothing
 go vet ./...
 go test ./... -count=1
+python3 tests/install_test.py
 ```
 
 And check that every target still builds — `cl` ships for macOS and Linux, and

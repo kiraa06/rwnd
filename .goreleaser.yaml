@@ -34,8 +34,9 @@ changelog:
 
 release:
   footer: |
-    ## Install
+    {{- $repo := .ReleaseURL | trimPrefix "https://github.com/" | splitList "/releases/tag/" | first -}}
+    ## Install or update
 
     ```sh
-    curl -fsSL https://raw.githubusercontent.com/kiraa06/rwnd/main/install.sh | sh
+    curl -fsSLo install.sh https://raw.githubusercontent.com/{{ $repo }}/{{ .Tag }}/install.sh && RWND_REPO={{ $repo }} sh install.sh
     ```

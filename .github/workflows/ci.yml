@@ -37,6 +37,11 @@ jobs:
       - name: Test
         run: go test ./... -count=1
 
+      - name: Test installer
+        run: |
+          sh -n install.sh
+          python3 tests/install_test.py
+
   cross-build:
     runs-on: ubuntu-latest
     steps:
