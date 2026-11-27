@@ -1,9 +1,4 @@
-// Command cl picks a Claude Code session to resume, or starts a new one.
-//
-// It lists sessions in three sections — the current directory first, then the
-// rest of the current git repository, then everywhere else — with the title
-// Claude gave each conversation, and hands the choice to claude by replacing
-// itself with it.
+// Command cl picks a local agent session to resume, or starts a new one.
 package main
 
 import (
@@ -35,21 +30,21 @@ func buildVersion() string {
 	return "dev"
 }
 
-const usage = `cl — pick a Claude Code session
+const usage = `cl — pick a local agent session
 
 usage:
   cl [query]      pick a session; a query opens the picker filtered
   cl --version    print the version
   cl --help       print this help
-  cl --claude|--grok|--codex
+  cl --claude|--grok|--codex|--hermes
                   force which agent the picker talks to (otherwise last used)
 
 keys:
   ↑↓ / jk   move            ⏎   start or resume
-  pgup/pgdn page            f   fork into a new session
-  ←→ / hl   choose model    d   delete (moves to trash)
+  pgup/pgdn page            f   fork (where supported)
+  ←→ / hl   choose model    d   move to trash (file-based agents)
   /         search          y   copy session id
-  p         preview         t   cycle claude / grok / codex
+  p         preview         t   cycle installed agents
   T         theme dark/light
   q         quit
 `
@@ -74,7 +69,7 @@ func run() error {
 
 	detected := tool.Detect()
 	if len(detected) == 0 {
-		return fmt.Errorf("claude, grok, or codex not found on PATH")
+		return fmt.Errorf("claude, grok, codex, or hermes not found on PATH")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -90,23 +85,22 @@ func run() error {
 		kind = env
 	}
 	if toolFlag != "" {
+		if tool.Binary(detected, toolFlag) == "" {
+			return fmt.Errorf("%s not found on PATH", toolFlag)
+		}
 		kind = toolFlag
 	}
 	if tool.Binary(detected, kind) == "" {
 		kind = detected[0].Kind
 	}
 
-	sessions, err := tool.List(kind, home)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-
 	names := make([]string, len(detected))
 	for i, d := range detected {
 		names[i] = d.Kind
 	}
-	model := ui.New(sessions, cwd, filepath.Join(home, ".claude"), tool.Models(kind, home))
+	model := ui.New(nil, cwd, filepath.Join(home, ".claude"), nil)
 	model.AttachTools(home, kind, names)
+	model.LoadSessions()
 	if query != "" {
 		model.SetQuery(query)
 	}
@@ -128,8 +122,44 @@ func run() error {
 	if bin == "" {
 		return fmt.Errorf("%s not found on PATH", kind)
 	}
-	spec := launch.BuildFor(kind, bin, choice.Mode, choice.Session.ID, choice.Session.Cwd, cwd, choice.Model)
+	spec, err := prepareLaunch(kind, bin, cwd, choice)
+	if err != nil {
+		return err
+	}
 	return launch.Exec(spec)
+}
+
+func prepareLaunch(kind, bin, cwd string, choice *ui.Choice) (launch.Spec, error) {
+	spec := launch.BuildFor(kind, bin, choice.Mode, choice.Session.ID, choice.Session.Cwd, cwd, choice.Model)
+	if len(spec.Args) == 0 {
+		return spec, nil
+	}
+	// The handoff changes directory. Keep a relative profile override pointed
+	// at the same store the picker just read, not at a path in the session cwd.
+	var profileEnv string
+	switch kind {
+	case tool.Codex:
+		if os.Getenv("CODEX_HOME") != "" {
+			profileEnv = "CODEX_HOME"
+		}
+	case tool.Hermes:
+		profileEnv = "HERMES_HOME"
+	}
+	if profileEnv != "" {
+		absolute, err := filepath.Abs(choice.StoreDir)
+		if err != nil {
+			return launch.Spec{}, err
+		}
+		if kind == tool.Hermes && filepath.Base(filepath.Dir(absolute)) != "profiles" {
+			// Hermes trusts a profile-shaped HERMES_HOME. For a default store,
+			// explicitly bypass the sticky marker, even if it hasn't changed yet.
+			spec.Args = append(spec.Args, "--profile", "default")
+		}
+		if err := os.Setenv(profileEnv, absolute); err != nil {
+			return launch.Spec{}, err
+		}
+	}
+	return spec, nil
 }
 
 // workingDir returns the current directory with symlinks resolved.
@@ -173,6 +203,8 @@ func parseArgs(args []string) (query string, a action, toolKind string) {
 			toolKind = tool.Grok
 		case "--codex":
 			toolKind = tool.Codex
+		case "--hermes":
+			toolKind = tool.Hermes
 		default:
 			terms = append(terms, arg)
 		}

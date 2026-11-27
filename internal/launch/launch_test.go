@@ -149,13 +149,6 @@ func TestExecRejectsEmptyInvocation(t *testing.T) {
 	}
 }
 
-func TestBinaryReportsMissingClaude(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	if _, err := Binary(); err != ErrNoClaude {
-		t.Errorf("err = %v, want ErrNoClaude", err)
-	}
-}
-
 func equalArgs(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

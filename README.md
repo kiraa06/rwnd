@@ -1,7 +1,7 @@
 <h1 align="center">rwnd</h1>
 
 <p align="center">
-  <em>Pick up where you left off in Claude Code, Grok, or Codex.</em>
+  <em>Pick up where you left off in Claude Code, Grok, Codex, or Hermes Agent.</em>
 </p>
 
 <p align="center">
@@ -24,37 +24,42 @@ first, then the rest of your repo, then everything else. Titles wrap instead of
 clipping. Forks and clones nest under their parent. The list and preview are
 bordered panes that follow the terminal size.
 
-## Install
+## Install or update
 
-**Script** — macOS and Linux, no Go needed:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/kiraa06/rwnd/main/install.sh | sh
-```
-
-Installs to `~/.local/bin`. Set `BINDIR=/usr/local/bin` to change that.
-
-**Go**:
+**From a release** — same command for a fresh install or an update on macOS and Linux:
 
 ```sh
-go install github.com/kiraa06/rwnd/cmd/cl@latest
+curl -fsSLo install.sh https://raw.githubusercontent.com/kiraa06/rwnd/main/install.sh && sh install.sh
 ```
+
+The installer uses the latest stable release from [GitHub Releases][releases].
+It verifies the archive and checks that the new binary runs before replacing
+`~/.local/bin/cl`. It does not change shell settings or session data. Rerunning
+it with the same release leaves the existing binary in place.
+
+Set `VERSION=vX.Y.Z` to pin a published tag or `BINDIR` to change where `cl`
+is installed. For example: `BINDIR="$HOME/bin" sh install.sh`.
+
+A checked-out installer uses its GitHub `origin`. For a standalone script from
+a fork, run `RWND_REPO=owner/repository sh install.sh`; if that fork has not
+published a release, the script stops instead of downloading upstream.
 
 **From source**:
 
 ```sh
-git clone https://github.com/kiraa06/rwnd
+git clone https://github.com/kiraa06/rwnd.git
 cd rwnd
-go build -ldflags='-s -w' -o ~/.local/bin/cl ./cmd/cl
+GOBIN="$HOME/.local/bin" go install ./cmd/cl
 ```
 
-Or grab a binary from the [releases page](https://github.com/kiraa06/rwnd/releases).
+[releases]: https://github.com/kiraa06/rwnd/releases
 
 ### Requirements
 
 - At least one of [Claude Code](https://claude.com/claude-code),
-  [Grok](https://x.ai/cli), or
-  [Codex](https://github.com/openai/codex) on your `PATH`
+  [Grok](https://x.ai/cli),
+  [Codex](https://github.com/openai/codex), or
+  [Hermes Agent](https://hermes-agent.nousresearch.com/) on your `PATH`
 - Go 1.26+ only if you build it yourself
 
 ## Use it
@@ -65,6 +70,7 @@ cl kafka        # open it filtered to "kafka"
 cl --claude     # Claude sessions for this run
 cl --grok       # Grok sessions for this run
 cl --codex      # Codex sessions for this run
+cl --hermes     # Hermes Agent sessions for this run
 ```
 
 Type `cl` where you'd normally type `claude`. The `New session` row is selected
@@ -76,14 +82,14 @@ by default, so `cl` then `⏎` is the same as running the current agent.
 |---|---|
 | `↑` `↓` / `j` `k` | move — section headers are skipped |
 | `PgUp` `PgDn` / `Ctrl+U` `Ctrl+D` | jump a screen |
-| `←` `→` / `h` `l` / `Tab` | choose the model |
+| `←` `→` / `h` `l` / `Tab` | choose the model (Hermes manages its own) |
 | `⏎` | start or resume the highlighted row |
-| `f` | **fork** — resume under a new session id, leaving the original untouched |
+| `f` | **fork** — resume under a new session id (Claude, Grok, Codex) |
 | `y` | copy the session id |
-| `d` | **delete** — moves the transcript to the trash, never erases it |
+| `d` | **delete** — moves a file-based transcript to the trash, never erases it |
 | `/` | search titles, directories, branches and models |
 | `p` | toggle the preview pane |
-| `t` | cycle **claude / grok / codex** — only when more than one is installed |
+| `t` | cycle installed agents — only when more than one is installed |
 | `T` | theme **dark / light** |
 | `g` / `G` | jump to first / last |
 | `q` / `esc` | quit |
@@ -113,16 +119,23 @@ stack trace. Scheduled runs are titled by their task name.
 The footer follows the highlighted row, so resuming a Sonnet conversation
 resumes it on Sonnet. For Claude, `New session` uses the `model` from
 `~/.claude/settings.json`; Grok reads `~/.grok/config.toml` and Codex
-reads `~/.codex/config.toml`. Press `←` `→` to override, and it stays put.
+reads `$CODEX_HOME/config.toml` (default: `~/.codex/config.toml`). Press `←` `→`
+to override, and it stays put.
 
 ### Other tools
 
-If `grok` or `codex` is on your PATH as well, press `t` to cycle
-**claude / grok / codex**. The current agent is labelled in the list pane
-(`agent grok`). The switcher is omitted when only one of those CLIs is
-installed. Default is Claude; the last choice is remembered in
+Press `t` to cycle **Claude / Grok / Codex / Hermes**. The current agent is
+labelled in the list pane (`agent grok`). The switcher is omitted when only one
+CLI is installed. Default is Claude; the last choice is remembered in
 `~/.config/cl/tool`. You can also pass `--claude`, `--grok`, or
-`--codex` for one run.
+`--codex`, or `--hermes` for one run.
+
+Hermes reads local conversations from the active profile’s `state.db`
+(`$HERMES_HOME`, or `~/.hermes` by default on macOS and Linux). The picker
+opens the store read-only and leaves the saved model and provider to Hermes.
+It doesn’t show gateway messaging chats, archived chats, or subagents. To fork
+a Hermes session, resume it and use `/branch`; use Hermes’s own session
+management to archive it.
 
 `T` switches **dark / light**. Dark is the original foreground-only palette.
 Light paints a white canvas (including every cell) so it stays readable on a
@@ -139,8 +152,9 @@ match, so terms narrow the list like they do in a shell.
 
 ### Deletes safely
 
-`d` asks first, then *moves* the transcript to `.<agent>/.trash-cl/<date>/`
-(under `~/.claude`, `~/.grok`, or `~/.codex`) along with its subagent logs.
+`d` asks first, then *moves* the transcript to a unique directory under
+`<agent-home>/.trash-cl/<date>/` (normally `~/.claude`, `~/.grok`, or `~/.codex`)
+along with its subagent logs.
 Nothing is unlinked — these files hold hours of conversation and can run to
 tens of megabytes.
 
@@ -163,9 +177,8 @@ cache.
 
 ## Troubleshooting
 
-**`cl: claude, grok, or codex not found on PATH`** — `cl` launches one of
-those agents. Install at least one and check with `which claude` (or `grok` /
-`codex`).
+**No supported agent found on `PATH`** — install at least one of `claude`,
+`grok`, `codex`, or `hermes` and check that its binary is on `PATH`.
 
 **macOS says `killed: 9` when you run `cl`.** Gatekeeper rejects Go's
 linker-signed binaries once they have been downloaded. The install script
@@ -175,8 +188,8 @@ re-signs it for you; if you unpacked a release by hand, do the same:
 xattr -c ./cl && codesign --force --sign - ./cl
 ```
 
-Installing with `go install` avoids this entirely, since the binary is compiled
-on your own machine.
+Building from source avoids this, since the binary is compiled on your own
+machine.
 
 **`command not found: cl` after installing** — `~/.local/bin` isn't on your
 `PATH`:

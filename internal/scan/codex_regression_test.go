@@ -48,6 +48,66 @@ func TestCodexInjectedUserTurns(t *testing.T) {
 	}
 }
 
+func TestCodexCleanupRespectsSeparateContentBlocks(t *testing.T) {
+	const request = "Keep the genuine request from this separate block"
+	for _, context := range []string{
+		"# AGENTS.md instructions for /repo\nUnwrapped machine instructions.",
+		"<environment_context>\nCurrent directory: /repo",
+		`{"agent_path":"worker","status":{"completed":"machine status"}}`,
+	} {
+		t.Run(context, func(t *testing.T) {
+			message := codexTestRecord("response_item", map[string]any{
+				"type": "message", "role": "user",
+				"content": []map[string]string{
+					{"type": "input_text", "text": context},
+					{"type": "input_text", "text": request},
+				},
+			})
+			sessions := codexTestScan(t, codexTestMeta(nil)+message)
+			if len(sessions) != 1 || sessions[0].Title != request || len(sessions[0].Preview) != 1 || sessions[0].Preview[0].Text != request {
+				t.Fatalf("context crossed a content boundary: %+v", sessions)
+			}
+		})
+	}
+}
+
+func TestCodexDropsNotificationsFromBothPreviewRoles(t *testing.T) {
+	const notice = `{"agent_path":"worker","status":{"completed":"machine status"}}`
+	const request = "Find the actual user request"
+	for _, role := range []string{"user", "assistant"} {
+		t.Run(role, func(t *testing.T) {
+			body := codexTestMeta(nil) + codexTestMessage("user", request)
+			for _, text := range []string{notice, "<subagent_notification>\n" + notice + "\n</subagent_notification>", "<task-notification>Task complete</task-notification>"} {
+				body += codexTestMessage(role, text)
+			}
+			const reply = "The actual reply"
+			body += codexTestMessage("assistant", reply+" <subagent_notification>"+notice+"</subagent_notification>")
+			sessions := codexTestScan(t, body)
+			if len(sessions) != 1 || sessions[0].Title != request {
+				t.Fatalf("lost the real title: %+v", sessions)
+			}
+			if got := sessions[0].Preview; len(got) != 2 || got[0] != (Turn{Role: "user", Text: request}) || got[1] != (Turn{Role: "assistant", Text: reply}) {
+				t.Fatalf("notification leaked into preview: %+v", got)
+			}
+		})
+	}
+}
+
+func TestCodexPreservesFencedContextExamples(t *testing.T) {
+	for _, fence := range []string{"```xml", "~~~~xml"} {
+		t.Run(fence, func(t *testing.T) {
+			closeFence := strings.TrimSuffix(fence, "xml")
+			example := fence + "\n<skill>example snippet</skill>\n" + closeFence
+			prompt := example + "\n<skill>injected manual</skill>\nKeep the example"
+			want := strings.Join(strings.Fields(example), " ") + " Keep the example"
+			sessions := codexTestScan(t, codexTestMeta(nil)+codexTestMessage("user", prompt))
+			if len(sessions) != 1 || sessions[0].Title != want || len(sessions[0].Preview) != 1 || sessions[0].Preview[0].Text != want {
+				t.Fatalf("fenced example changed or machine context remained: %+v, want %q", sessions, want)
+			}
+		})
+	}
+}
+
 func TestCodexRejectsCorruptForkHeader(t *testing.T) {
 	for _, header := range []string{
 		`{"type":"session_meta","payload":{"id":"fork","cwd":`,
@@ -62,6 +122,28 @@ func TestCodexRejectsCorruptForkHeader(t *testing.T) {
 		if sessions := codexTestScan(t, body); len(sessions) != 0 {
 			t.Errorf("listed corrupt fork using id=%q, want omitted", sessions[0].ID)
 		}
+	}
+}
+
+func TestCodexRejectsDiscardedHeaderWithBlankFinalFragment(t *testing.T) {
+	for _, kind := range []string{"event_msg", "response_item"} {
+		t.Run(kind, func(t *testing.T) {
+			header := strings.TrimSuffix(codexTestRecord(kind, map[string]string{"type": "function_call_output"}), "\n")
+			body := header + strings.Repeat(" ", 128<<10) + "\n"
+			body += codexTestMeta(map[string]any{"id": "parent"}) + codexTestMessage("user", "fix this forked conversation please")
+			if sessions := codexTestScan(t, body); len(sessions) != 0 {
+				t.Fatalf("listed fork under inherited identity %q", sessions[0].ID)
+			}
+		})
+	}
+}
+
+func TestCodexAcceptsLargeHeaderAfterBlankRecords(t *testing.T) {
+	meta := `{"payload":{"instructions":"` + strings.Repeat("x", 128<<10) + `","id":"fork","cwd":"/repo"},"type":"session_meta"}`
+	body := "\n" + strings.Repeat(" ", 128<<10) + "\n" + meta + "\n"
+	body += codexTestMeta(map[string]any{"id": "parent"}) + codexTestMessage("user", "fix this forked conversation please")
+	if sessions := codexTestScan(t, body); len(sessions) != 1 || sessions[0].ID != "fork" {
+		t.Fatalf("lost valid fork header: %+v", sessions)
 	}
 }
 

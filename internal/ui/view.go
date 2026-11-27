@@ -10,6 +10,7 @@ import (
 
 	"github.com/kiraa06/rwnd/internal/group"
 	"github.com/kiraa06/rwnd/internal/scan"
+	"github.com/kiraa06/rwnd/internal/tool"
 )
 
 // Colours are adaptive so the picker reads correctly on light and dark
@@ -37,7 +38,10 @@ const (
 )
 
 func (m Model) footerLines() int {
-	return strings.Count(m.renderFooter(), "\n") + 1
+	if m.confirming || m.searching || m.status != "" {
+		return 3
+	}
+	return 2
 }
 
 // listHeight is how many list rows fit inside the bordered pane.
@@ -78,31 +82,35 @@ func (m *Model) clampOffset() {
 	if m.cursor < m.offset {
 		m.offset = m.cursor
 	}
-	for m.offset < m.cursor && m.visualSpan(m.offset, m.cursor, w) > h {
+	for m.offset < m.cursor && m.windowSpan(m.offset, m.cursor, w) > h {
 		m.offset++
 	}
 	last := len(m.rows) - 1
-	for m.offset > 0 && last >= 0 && m.visualSpan(m.offset-1, last, w) <= h {
+	for m.offset > 0 && last >= 0 && m.windowSpan(m.offset-1, last, w) <= h {
 		m.offset--
-	}
-	if m.cursor < m.offset {
-		m.offset = m.cursor
-	}
-	for m.offset < m.cursor && m.visualSpan(m.offset, m.cursor, w) > h {
-		m.offset++
 	}
 	if m.offset < 0 {
 		m.offset = 0
 	}
 }
 
-// visualSpan is the number of terminal lines rows [from, to] occupy.
-func (m Model) visualSpan(from, to, width int) int {
+// windowSpan counts rows and the indicators for content above or below them.
+func (m Model) windowSpan(from, to, width int) int {
 	n := 0
+	if from > 0 {
+		n++
+	}
+	if to < len(m.rows)-1 {
+		n++
+	}
 	for i := from; i <= to && i < len(m.rows); i++ {
 		n += m.rowVisualHeight(i, width)
 	}
 	return n
+}
+
+func (m Model) hasRowDivider(i int) bool {
+	return i+1 < len(m.rows) && m.rows[i].selectable() && m.rows[i+1].selectable()
 }
 
 func (m Model) rowVisualHeight(i, width int) int {
@@ -115,11 +123,15 @@ func (m Model) rowVisualHeight(i, width int) int {
 			return 2
 		}
 		return 1
-	case rowSession:
-		return len(m.sessionTitleLines(i, width))
-	default:
-		return 1
 	}
+	h := 1
+	if m.rows[i].kind == rowSession {
+		h = len(m.sessionTitleLines(i, width))
+	}
+	if m.hasRowDivider(i) {
+		h++
+	}
+	return h
 }
 
 var paneBorder = lipgloss.NewStyle().
@@ -182,7 +194,7 @@ func (m Model) renderListPane(outerW, outerH int) string {
 	b.WriteByte('\n')
 	b.WriteString(m.renderColumnHeader(innerW))
 	b.WriteByte('\n')
-	b.WriteString(faint.Render(strings.Repeat("─", max(innerW, 8))))
+	b.WriteString(m.renderGridRule(innerW, "┴"))
 	b.WriteByte('\n')
 	b.WriteString(m.renderList(innerW))
 	return framePane(b.String(), outerW, outerH)
@@ -228,6 +240,16 @@ func (m Model) renderColumnHeader(width int) string {
 	return pad(title, width)
 }
 
+func (m Model) renderGridRule(width int, junction string) string {
+	tw, showPath := m.titleColWidth(width)
+	rule := strings.Repeat("─", tw+1) + junction
+	if showPath {
+		rule += strings.Repeat("─", pathColumn+2) + junction
+	}
+	rule += strings.Repeat("─", ageColumn+2) + junction + strings.Repeat("─", modelColumn+1)
+	return faint.Render(rule)
+}
+
 func (m Model) renderList(width int) string {
 	if len(m.rows) == 0 {
 		return pad(faint.Render("  no sessions"), width)
@@ -236,7 +258,9 @@ func (m Model) renderList(width int) string {
 
 	var b strings.Builder
 	used := 0
-	if m.offset > 0 {
+	// In a very short terminal, give the selected chat priority over the
+	// scroll indicators so a wrapped title can still be shown in full.
+	if m.offset > 0 && (m.offset < m.cursor || m.rowVisualHeight(m.cursor, width) < h) {
 		b.WriteString(pad(faint.Render(fmt.Sprintf("  ↑ %d more", m.offset)), width))
 		b.WriteByte('\n')
 		used++
@@ -245,18 +269,22 @@ func (m Model) renderList(width int) string {
 	for i := m.offset; i < len(m.rows); i++ {
 		vh := m.rowVisualHeight(i, width)
 		need := vh
-		if i < len(m.rows)-1 {
+		if i != m.cursor && i < len(m.rows)-1 {
 			need++ // leave a line for ↓ N more
 		}
-		if used > 0 && used+need > h {
+		if used+need > h {
 			break
 		}
 		b.WriteString(m.renderRow(i, width))
 		b.WriteByte('\n')
+		if m.hasRowDivider(i) {
+			b.WriteString(m.renderGridRule(width, "┼"))
+			b.WriteByte('\n')
+		}
 		used += vh
 		end = i + 1
 	}
-	if end < len(m.rows) {
+	if end < len(m.rows) && used < h {
 		b.WriteString(pad(faint.Render(fmt.Sprintf("  ↓ %d more", len(m.rows)-end)), width))
 	}
 	return b.String()
@@ -266,16 +294,17 @@ func (m Model) renderRow(i, width int) string {
 	r := m.rows[i]
 	switch r.kind {
 	case rowHeader:
-		line := header.Render(r.text)
+		count := ""
 		if r.count > 0 {
-			line += dim.Render(fmt.Sprintf("  %d", r.count))
+			count = fmt.Sprintf("  %d", r.count)
 		}
+		line := header.Render(clip(r.text, width-lipgloss.Width(count))) + dim.Render(count)
 		if i > 0 {
 			return "\n" + pad(line, width)
 		}
 		return pad(line, width)
 	case rowNote:
-		return pad(faint.Render("    "+r.text), width)
+		return pad(faint.Render(clip("    "+r.text, width)), width)
 	case rowNew:
 		return m.renderNewRow(i, width)
 	default:
@@ -284,13 +313,12 @@ func (m Model) renderRow(i, width int) string {
 }
 
 func (m Model) renderNewRow(i, width int) string {
-	tw, showPath := m.titleColWidth(width)
 	if i == m.cursor {
 		label := marker.Render("  ▸ ") + selected.Render("New session") + dim.Render("  in this directory")
-		return m.joinCols(pad(label, tw), "", "", "", true, showPath)
+		return m.joinCols(label, "", "", "", true, width)
 	}
 	label := fill(4) + accent.Render("New session")
-	return m.joinCols(pad(label, tw), "", "", "", false, showPath)
+	return m.joinCols(label, "", "", "", false, width)
 }
 
 func (m Model) renderSessionRow(i, width int) string {
@@ -309,9 +337,8 @@ func (m Model) renderSessionRow(i, width int) string {
 	}
 	modelCell := shortModel(s.Model)
 
-	cursor, tree := m.sessionPrefix(i)
-	tw, showPath := m.titleColWidth(width)
-	inner := max(tw-lipgloss.Width(cursor+tree), 8)
+	tw, _ := m.titleColWidth(width)
+	cursor, tree := m.sessionPrefix(i, tw)
 	painted := m.paintTitle(lines[0], sel, r.context)
 	if s.AITitled {
 		painted += aiMark.Render(" ·")
@@ -319,36 +346,33 @@ func (m Model) renderSessionRow(i, width int) string {
 	if s.ParentID != "" {
 		painted += faint.Render(forkMark)
 	}
-	name := pad(painted, inner)
-	var title string
 	if sel {
-		title = marker.Render(cursor) + faint.Render(tree) + name
-	} else {
-		title = cursor + faint.Render(tree) + name
+		cursor = marker.Render(cursor)
 	}
+	title := cursor + faint.Render(tree) + painted
 
-	line := m.joinCols(title, path, ageCell, modelCell, sel, showPath)
+	line := m.joinCols(title, path, ageCell, modelCell, sel, width)
 	if len(lines) == 1 {
 		return line
 	}
 	cont := fill(lipgloss.Width(cursor+tree)) + m.paintTitle(lines[1], sel, r.context)
-	return line + "\n" + m.joinCols(pad(cont, tw), "", "", "", sel, showPath)
+	return line + "\n" + m.joinCols(cont, "", "", "", sel, width)
 }
 
-func (m Model) sessionPrefix(i int) (cursor, tree string) {
+func (m Model) sessionPrefix(i, titleWidth int) (cursor, tree string) {
 	r := m.rows[i]
 	if i == m.cursor {
 		cursor = "  ▸ "
 	} else {
 		cursor = fill(4)
 	}
-	if r.depth <= 0 {
+	// Reserve room for the title and badges before spending cells on depth.
+	depth := min(r.depth, max((titleWidth-4-8-m.badgeWidth(i))/3, 0))
+	if depth == 0 {
 		return cursor, ""
 	}
 	var b strings.Builder
-	for d := 1; d < r.depth; d++ {
-		b.WriteString("   ")
-	}
+	b.WriteString(strings.Repeat("   ", depth-1))
 	if r.last {
 		b.WriteString("└─ ")
 	} else {
@@ -373,26 +397,28 @@ func (m Model) titleColWidth(width int) (titleW int, showPath bool) {
 
 func (m Model) titleWidth(i, width int) int {
 	tw, _ := m.titleColWidth(width)
-	cursor, tree := m.sessionPrefix(i)
-	inner := max(tw-lipgloss.Width(cursor+tree), 8)
-	if i < 0 || i >= len(m.rows) {
-		return inner
-	}
+	cursor, tree := m.sessionPrefix(i, tw)
+	return max(tw-lipgloss.Width(cursor+tree)-m.badgeWidth(i), 8)
+}
+
+func (m Model) badgeWidth(i int) int {
 	s := m.rows[i].session
+	width := 0
 	if s.AITitled {
-		inner = max(inner-2, 8)
+		width += 2
 	}
 	if s.ParentID != "" {
-		inner = max(inner-lipgloss.Width(forkMark), 8)
+		width += lipgloss.Width(forkMark)
 	}
-	return inner
+	return width
 }
 
 func (m Model) sessionTitleLines(i, width int) []string {
 	return wrapTitle(m.rows[i].display.Title, m.titleWidth(i, width), titleLines)
 }
 
-func (m Model) joinCols(title, path, ageCell, modelCell string, sel, showPath bool) string {
+func (m Model) joinCols(title, path, ageCell, modelCell string, sel bool, width int) string {
+	tw, showPath := m.titleColWidth(width)
 	sep := faint.Render(" │ ")
 	if sel && (path != "" || ageCell != "" || modelCell != "") {
 		sep = selected.Render(" │ ")
@@ -403,7 +429,7 @@ func (m Model) joinCols(title, path, ageCell, modelCell string, sel, showPath bo
 	}
 	modelOut := metaCell(modelCell, modelColumn, sel, dim)
 	pathOut := metaCell(path, pathColumn, sel, faint)
-	line := title
+	line := pad(clip(title, tw), tw)
 	if showPath {
 		line += sep + pathOut
 	}
@@ -567,9 +593,11 @@ func (m Model) renderFooter() string {
 
 	if m.confirming {
 		if r, ok := m.current(); ok {
-			lines = append(lines, warn.Render("delete ")+
-				selected.Render(clip(r.display.Title, 48))+
-				warn.Render("?  y / n")+
+			const prefix, prompt = "delete ", "?  y / n"
+			label := clip(r.display.Title, min(48, max(m.width-len(prefix)-len(prompt), 2)))
+			lines = append(lines, warn.Render(prefix)+
+				selected.Render(label)+
+				warn.Render(prompt)+
 				dim.Render("  (moved to trash, not erased)"))
 		}
 	} else if m.searching {
@@ -578,26 +606,44 @@ func (m Model) renderFooter() string {
 		lines = append(lines, warn.Render(scan.SanitizeDisplayText(m.status)))
 	}
 
-	var models []string
-	for i := range m.models {
-		displayName := m.displayModels[i]
-		if i == m.modelIdx {
-			models = append(models, marker.Render("‹ ")+selected.Render(displayName)+marker.Render(" ›"))
-			continue
-		}
-		models = append(models, faint.Render(displayName))
-	}
-	lines = append(lines, dim.Render("model  ")+strings.Join(models, fill(2)))
+	lines = append(lines, m.renderModelLine())
 
-	hints := "↑↓ move · pgup/pgdn · ←→ model · ⏎ start · f fork · y copy id · d delete · / search · p preview · T dark/light · q quit"
-	if len(m.tools) >= 2 {
-		hints = "↑↓ move · pgup/pgdn · ←→ model · ⏎ start · f fork · y copy id · d delete · t " + strings.Join(m.tools, "/") + " · T dark/light · / search · p preview · q quit"
+	hints := "↑↓ move · pgup/pgdn · ←→ model · ⏎ start · f fork · y copy id · d delete"
+	if m.currentTool() == tool.Hermes {
+		hints = "↑↓ move · pgup/pgdn · ⏎ start · y copy id"
 	}
+	if len(m.tools) >= 2 {
+		hints += " · t " + strings.Join(m.tools, "/")
+	}
+	hints += " · / search · p preview · T dark/light · q quit"
 	if m.searching {
 		hints = "type to filter · ↑↓ move · ⏎ start · esc clear"
 	}
 	lines = append(lines, faint.Render(hints))
 	return strings.Join(lines, "\n")
+}
+
+func (m Model) renderModelLine() string {
+	const label = "model  "
+	active := func(name string) string {
+		return marker.Render("‹ ") + selected.Render(name) + marker.Render(" ›")
+	}
+	models := make([]string, 0, len(m.models))
+	for i, model := range m.models {
+		name := scan.SanitizeDisplayText(model)
+		if i == m.modelIdx {
+			models = append(models, active(name))
+		} else {
+			models = append(models, faint.Render(name))
+		}
+	}
+	line := dim.Render(label) + strings.Join(models, fill(2))
+	if m.currentModel() != "" && lipgloss.Width(line) > m.width {
+		// On narrow terminals, the active model matters more than its alternatives.
+		name := scan.SanitizeDisplayText(m.currentModel())
+		return dim.Render(label) + active(clip(name, max(m.width-len(label)-4, 2)))
+	}
+	return line
 }
 
 // age renders a compact relative time: the list is scanned, not read.
@@ -649,13 +695,12 @@ func isModelName(id string) bool {
 	return true
 }
 
-// clip truncates to a rune budget, marking the cut.
+// clip truncates to a display cell budget, preserving ANSI styles.
 func clip(s string, width int) string {
-	r := []rune(s)
-	if width <= 1 || len(r) <= width {
+	if width <= 1 || lipgloss.Width(s) <= width {
 		return s
 	}
-	return strings.TrimRight(string(r[:width-1]), " ") + "…"
+	return strings.TrimRight(lipgloss.NewStyle().MaxWidth(width-1).Render(s), " ") + "…"
 }
 
 // pad right-pads to a display width.

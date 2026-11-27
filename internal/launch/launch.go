@@ -4,7 +4,6 @@ package launch
 import (
 	"errors"
 	"os"
-	"os/exec"
 )
 
 // Mode is what to do with the chosen row.
@@ -53,13 +52,20 @@ func Build(bin string, mode Mode, sessionID, sessionDir, cwd, model string) Spec
 	return Spec{Dir: dir, Args: args}
 }
 
-// BuildFor assembles an invocation for claude, grok, or codex.
+// BuildFor assembles an invocation for the chosen agent.
 func BuildFor(kind, bin string, mode Mode, sessionID, sessionDir, cwd, model string) Spec {
 	switch kind {
 	case "grok":
 		return buildGrok(bin, mode, sessionID, sessionDir, cwd, model)
 	case "codex":
 		return buildCodex(bin, mode, sessionID, sessionDir, cwd, model)
+	case "hermes":
+		// Hermes resumes its model and provider as a pair. Passing the picker
+		// model would override that routing and could select the wrong provider.
+		if mode == Fork {
+			return Spec{} // no command-line fork; use /branch after resuming
+		}
+		return Build(bin, mode, sessionID, sessionDir, cwd, "")
 	default:
 		return Build(bin, mode, sessionID, sessionDir, cwd, model)
 	}
@@ -102,18 +108,6 @@ func buildCodex(bin string, mode Mode, sessionID, sessionDir, cwd, model string)
 		args = append(args, "-c", "model="+model)
 	}
 	return Spec{Dir: dir, Args: args}
-}
-
-// ErrNoClaude reports that the claude binary is not on PATH.
-var ErrNoClaude = errors.New("claude not found on PATH")
-
-// Binary resolves the claude executable.
-func Binary() (string, error) {
-	path, err := exec.LookPath("claude")
-	if err != nil {
-		return "", ErrNoClaude
-	}
-	return path, nil
 }
 
 // Exec hands control to claude, replacing this process where the platform

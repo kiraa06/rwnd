@@ -4,6 +4,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/kiraa06/rwnd/internal/launch"
@@ -14,9 +16,10 @@ const (
 	Claude = "claude"
 	Grok   = "grok"
 	Codex  = "codex"
+	Hermes = "hermes"
 )
 
-var order = []string{Claude, Grok, Codex}
+var order = []string{Claude, Grok, Codex, Hermes}
 
 var grokFamilies = []string{"grok-4.6", "grok-4.5"}
 
@@ -26,8 +29,8 @@ type Detected struct {
 	Bin  string
 }
 
-// Detect returns claude, grok and/or codex, in that order, when the binary
-// is on PATH. An empty session store is still launchable (New session).
+// Detect returns supported agents on PATH in picker order. An empty session
+// store is still launchable (New session).
 func Detect() []Detected {
 	var out []Detected
 	for _, kind := range order {
@@ -40,15 +43,18 @@ func Detect() []Detected {
 	return out
 }
 
-// List sessions for kind under the user's home directory.
-func List(kind, home string) ([]scan.Session, error) {
+// ListStore reads a previously resolved store so the picker can hand off to
+// precisely the profile it displayed, even if the sticky profile changes.
+func ListStore(kind, store string) ([]scan.Session, error) {
 	switch kind {
 	case Grok:
-		return scan.Grok(filepath.Join(home, ".grok", "sessions"))
+		return scan.Grok(filepath.Join(store, "sessions"))
 	case Codex:
-		return scan.Codex(filepath.Join(home, ".codex", "sessions"))
+		return scan.Codex(filepath.Join(store, "sessions"))
+	case Hermes:
+		return scan.Hermes(filepath.Join(store, "state.db"))
 	default:
-		return scan.All(filepath.Join(home, ".claude", "projects"))
+		return scan.All(filepath.Join(store, "projects"))
 	}
 }
 
@@ -56,14 +62,16 @@ func List(kind, home string) ([]scan.Session, error) {
 func Models(kind, home string) []string {
 	switch kind {
 	case Grok:
-		return withDefault(tomlValue(filepath.Join(home, ".grok", "config.toml"), "default"), grokFamilies)
+		return withDefault(tomlValue(filepath.Join(StoreDir(kind, home), "config.toml"), "default"), grokFamilies)
 	case Codex:
-		if m := tomlValue(filepath.Join(home, ".codex", "config.toml"), "model"); m != "" {
+		if m := tomlValue(filepath.Join(StoreDir(kind, home), "config.toml"), "model"); m != "" {
 			return []string{m}
 		}
 		return nil
+	case Hermes:
+		return nil // Hermes restores the model and its provider together
 	default:
-		list, _ := launch.Models(filepath.Join(home, ".claude", "settings.json"))
+		list, _ := launch.Models(filepath.Join(StoreDir(kind, home), "settings.json"))
 		return list
 	}
 }
@@ -74,10 +82,74 @@ func StoreDir(kind, home string) string {
 	case Grok:
 		return filepath.Join(home, ".grok")
 	case Codex:
+		if dir := os.Getenv("CODEX_HOME"); dir != "" {
+			return dir
+		}
 		return filepath.Join(home, ".codex")
+	case Hermes:
+		return hermesHome(home)
 	default:
 		return filepath.Join(home, ".claude")
 	}
+}
+
+var hermesProfileID = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
+func hermesHome(home string) string {
+	native := hermesNativeHome(home)
+	launchRoot, markerRoot := native, native
+	if override := strings.TrimSpace(os.Getenv("HERMES_HOME")); override != "" {
+		launchRoot = os.ExpandEnv(override)
+		if launchRoot == "~" || strings.HasPrefix(launchRoot, "~/") || (runtime.GOOS == "windows" && strings.HasPrefix(launchRoot, `~\`)) {
+			launchRoot = filepath.Join(home, launchRoot[1:])
+		}
+		if filepath.Base(filepath.Dir(launchRoot)) == "profiles" {
+			return launchRoot // explicitly selected named profile
+		}
+		// Hermes reads the sticky marker from the native root if the override
+		// is inside it, but resolves the name against HERMES_HOME itself.
+		rel, err := filepath.Rel(hermesResolvedPath(native), hermesResolvedPath(launchRoot))
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			markerRoot = launchRoot
+		}
+	}
+
+	selected, err := os.ReadFile(filepath.Join(markerRoot, "active_profile"))
+	if err == nil {
+		name := strings.TrimSpace(strings.TrimPrefix(string(selected), "\ufeff"))
+		if name != "default" && hermesProfileID.MatchString(name) {
+			return filepath.Join(launchRoot, "profiles", name)
+		}
+	}
+	return launchRoot
+}
+
+func hermesNativeHome(home string) string {
+	suffix := os.Getenv("HERMES_DATA_DIR_SUFFIX")
+	if runtime.GOOS == "windows" {
+		base := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
+		if base == "" {
+			base = filepath.Join(home, "AppData", "Local")
+		}
+		return filepath.Join(base, "hermes"+suffix)
+	}
+	return filepath.Join(home, ".hermes"+suffix)
+}
+
+// Only use resolved spelling to choose the marker, never for the launch root.
+func hermesResolvedPath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	} else if os.IsNotExist(err) {
+		// Hermes' Path.resolve() also resolves existing parents of missing paths.
+		if parent := filepath.Dir(path); parent != path {
+			return filepath.Join(hermesResolvedPath(parent), filepath.Base(path))
+		}
+	}
+	return path
 }
 
 // Binary of kind from a Detected list, or "".
@@ -126,7 +198,7 @@ func LoadPreferred() string {
 	}
 	s := strings.TrimSpace(string(data))
 	switch s {
-	case Claude, Grok, Codex:
+	case Claude, Grok, Codex, Hermes:
 		return s
 	}
 	return Claude
