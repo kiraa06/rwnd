@@ -48,6 +48,28 @@ func BenchmarkCodexToolStore(b *testing.B) {
 	}
 }
 
+func BenchmarkCodexPromptCleanup(b *testing.B) {
+	const request = "Keep the genuine request"
+	for _, count := range []int{128, 512, 2048} {
+		for _, shape := range []struct{ name, unit, suffix string }{
+			{"adjacent", "<skill>injected manual</skill>", ""},
+			{"adjacent_fence", "<skill>\n```\ninjected manual\n</skill>", ""},
+			{"nested", "<skill>", strings.Repeat("</skill>", count)},
+		} {
+			b.Run(fmt.Sprintf("%s/%d", shape.name, count), func(b *testing.B) {
+				prompt := strings.Repeat(shape.unit, count) + shape.suffix + "\n" + request
+				b.SetBytes(int64(len(prompt)))
+				b.ReportAllocs()
+				for b.Loop() {
+					if got := codexCleanBlock(prompt, true); got != request {
+						b.Fatalf("cleanup left %d bytes, want %q", len(got), request)
+					}
+				}
+			})
+		}
+	}
+}
+
 func BenchmarkCodexHugeIgnoredRecord(b *testing.B) {
 	body := codexTestMeta(nil) + codexTestMessage("user", "find the session after a huge ignored record")
 	body += `{"type":"response_item","payload":{"type":"function_call_output","output":"` + strings.Repeat("x", 16<<20) + `"}}` + "\n"

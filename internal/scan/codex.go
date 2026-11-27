@@ -143,6 +143,11 @@ func readCodex(f io.Reader) (codexMeta, error) {
 		fragment, err := reader.ReadSlice('\n')
 		if len(record) == 0 && !discard {
 			kind, discard = codexDiscard(fragment, parser.seenMeta)
+			if discard && !parser.seenMeta {
+				// The prefix already identifies a non-header record. Its last
+				// fragment may be blank, but the record is not a blank line.
+				return codexMeta{Hidden: true}, nil
+			}
 		}
 		if err == bufio.ErrBufferFull {
 			if !discard {
@@ -155,7 +160,7 @@ func readCodex(f io.Reader) (codexMeta, error) {
 			record = append(record, fragment...)
 			line = record
 		}
-		if !discard || !parser.seenMeta {
+		if !discard {
 			parser.consume(line, kind)
 		}
 		record = record[:0]
@@ -236,19 +241,18 @@ func (p *codexParser) consume(line []byte, kind string) {
 		if r.Payload.Model != "" {
 			p.legacyModel = r.Payload.Model
 		}
-		raw := codexText(r.Payload.Content)
-		var text string
-		if r.Payload.Role == "user" {
-			if p.originator == "paseo" && len(p.candidates) == 0 && codexTitleGeneration(raw) {
-				p.meta.Hidden = true
-				return
-			}
-			text = codexPrompt(raw)
-			if text != "" && len(p.candidates) < titleCandidates {
-				p.candidates = append(p.candidates, text)
-			}
-		} else {
-			text = codexDisplayText(raw)
+		blocks := codexTextBlocks(r.Payload.Content)
+		user := r.Payload.Role == "user"
+		if user && p.originator == "paseo" && len(p.candidates) == 0 && codexTitleGeneration(strings.Join(blocks, " ")) {
+			p.meta.Hidden = true
+			return
+		}
+		for i, raw := range blocks {
+			blocks[i] = codexStripDisplayTags(codexCleanBlock(raw, user))
+		}
+		text := codexDisplayText(strings.Join(blocks, " "))
+		if user && text != "" && len(p.candidates) < titleCandidates {
+			p.candidates = append(p.candidates, text)
 		}
 		if text != "" {
 			p.meta.Preview = appendTurn(p.meta.Preview, Turn{Role: r.Payload.Role, Text: text})
@@ -278,32 +282,28 @@ func decodeCodex(line []byte) (codexRecord, bool) {
 	return r, true
 }
 
-func codexText(raw json.RawMessage) string {
+func codexTextBlocks(raw json.RawMessage) []string {
 	var text string
 	if json.Unmarshal(raw, &text) == nil {
-		return text
+		return []string{text}
 	}
 	var blocks []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
 	if json.Unmarshal(raw, &blocks) != nil {
-		return ""
+		return nil
 	}
-	var b strings.Builder
+	var texts []string
 	for _, blk := range blocks {
 		if (blk.Type == "text" || blk.Type == "input_text" || blk.Type == "output_text") && blk.Text != "" {
-			if b.Len() > 0 {
-				b.WriteByte(' ')
-			}
-			b.WriteString(blk.Text)
+			texts = append(texts, blk.Text)
 		}
 	}
-	return b.String()
+	return texts
 }
 
 func codexDisplayText(text string) string {
-	text = loneTag.ReplaceAllString(text, " ")
 	text = SanitizeDisplayText(text)
 	return truncate(strings.Join(strings.Fields(text), " "), titleMaxLen)
 }
